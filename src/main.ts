@@ -21,6 +21,7 @@ import {
     readFile,
     writeFile,
 } from "./fs-helpers";
+import { asciimath } from "./asciimath.js"
 
 const app = document.querySelector("#editor");
 let lineWrap = new Compartment(),
@@ -88,6 +89,42 @@ const image = ViewPlugin.fromClass(
             }),
     }
 );
+class MathMlWidget extends WidgetType {
+    constructor(readonly mathml: string) {
+        super();
+    }
+    toDOM() {
+        let outer = document.createElement("span")
+        outer.innerHTML = this.mathml
+        return outer;
+    }
+}
+const mathMlMatcher = new MatchDecorator({
+    regexp: /➕{(.*)}/g,
+    decoration: (match) =>
+        Decoration.replace({
+            widget: new MathMlWidget(match[1]),
+        }),
+    maxLength: Infinity,
+});
+const mathMl = ViewPlugin.fromClass(
+    class {
+        mathMl: DecorationSet;
+        constructor(view: EditorView) {
+            this.mathMl = mathMlMatcher.createDeco(view);
+        }
+        update(update: ViewUpdate) {
+            this.mathMl = mathMlMatcher.updateDeco(update, this.mathMl);
+        }
+    },
+    {
+        decorations: (instance) => instance.mathMl,
+        provide: (plugin) =>
+            EditorView.atomicRanges.of((view) => {
+                return view.plugin(plugin)?.mathMl || Decoration.none;
+            }),
+    }
+);
 let domEventHandler = EditorView.domEventHandlers({
     paste(event, view) {
         var items = event.clipboardData?.items;
@@ -144,6 +181,9 @@ let theme = EditorView.theme({
 });
 function saveTab(selected_tab: number) {
     return EditorView.updateListener.of((v) => {
+        if (tabs[selected_tab].newState) {
+            tabs[selected_tab].state = v.state;
+        }
         if (v.docChanged) {
             if (tabs[selected_tab].saved) {
                 tabs[selected_tab].saved = false;
@@ -153,21 +193,25 @@ function saveTab(selected_tab: number) {
         }
     });
 }
+function defaultEditorExtensions(selected_tab: number): Extension[] {
+    return [
+        vim(),
+        minimalSetup,
+        theme,
+        keymap.of([indentWithTab]),
+        mathEvalKeymap,
+        saveTab(selected_tab),
+        image,
+        domEventHandler,
+        lineWrap.of(JSON.parse(localStorage.wrap || "true") ? EditorView.lineWrapping : []),
+        lineNumbers.of(JSON.parse(localStorage.numbers || "true") ? editorLineNumbers() : []),
+        mathMl,
+    ]
+}
 function createDefaultEditorState(selected_tab: number) {
     return EditorState.create({
         doc: "",
-        extensions: [
-            vim(),
-            minimalSetup,
-            theme,
-            keymap.of([indentWithTab]),
-            mathEvalKeymap,
-            saveTab(selected_tab),
-            image,
-            domEventHandler,
-            lineWrap.of(EditorView.lineWrapping),
-            lineNumbers.of(editorLineNumbers()),
-        ],
+        extensions: defaultEditorExtensions(selected_tab),
     });
 }
 function createNewEditorStateWithContents(
@@ -176,22 +220,11 @@ function createNewEditorStateWithContents(
 ) {
     return EditorState.create({
         doc: contents,
-        extensions: [
-            vim(),
-            minimalSetup,
-            theme,
-            keymap.of([indentWithTab]),
-            mathEvalKeymap,
-            saveTab(selected_tab),
-            image,
-            domEventHandler,
-            lineWrap.of(EditorView.lineWrapping),
-            lineNumbers.of(editorLineNumbers()),
-        ],
+        extensions: defaultEditorExtensions(selected_tab),
     });
 }
 async function saveFileAs() {
-    let fileHandle;
+    let fileHandle: FileSystemFileHandle | null;
     try {
         fileHandle = await getNewFileHandle();
     } catch (ex: any) {
@@ -204,7 +237,7 @@ async function saveFileAs() {
         return;
     }
     try {
-        await writeFile(fileHandle, editor.state.doc.toString());
+        await writeFile(fileHandle!, editor.state.doc.toString());
         tabs[selected_tab].fsHandle = fileHandle;
         tabs[selected_tab].saved = true;
         tabs[selected_tab].name = tabs[selected_tab].fsHandle!.name;
@@ -223,6 +256,7 @@ Vim.defineEx("new", "n", function () {
         saved: false,
         fsHandle: null,
         state: createDefaultEditorState(tabs.length),
+        newState: false,
     });
     set_selected_tab(tabs.length - 1);
 });
@@ -256,6 +290,7 @@ Vim.defineEx("quite", "q", function () {
                 saved: false,
                 fsHandle: null,
                 state: createDefaultEditorState(0),
+                newState: false,
             },
         ];
         set_selected_tab(0);
@@ -281,15 +316,19 @@ Vim.defineEx("set", "", function (cm: CodeMirror, params: any) {
     let args: string[] = params.args;
     switch (args[0]) {
         case "numbers":
+            localStorage.numbers = true;
             set_compartment(cm, editorLineNumbers(), lineNumbers);
             break;
         case "nonumbers":
+            localStorage.numbers = false;
             set_compartment(cm, [], lineNumbers);
             break;
         case "wrap":
+            localStorage.wrap = true;
             set_compartment(cm, EditorView.lineWrapping, lineWrap);
             break;
         case "nowrap":
+            localStorage.wrap = false;
             set_compartment(cm, [], lineWrap);
             break;
         default:
@@ -298,8 +337,7 @@ Vim.defineEx("set", "", function (cm: CodeMirror, params: any) {
 });
 Vim.defineEx("insertimg", "i", async function (cm: CodeMirror, params: any) {
     let args: string[] = params.args;
-    console.log(args);
-    if (args.length === 0) {
+    if (args.length === undefined) {
         let file_handle = await getFileHandle();
         let file = await file_handle.getFile();
         let reader = new FileReader();
@@ -323,6 +361,19 @@ Vim.defineEx("insertimg", "i", async function (cm: CodeMirror, params: any) {
         image.src = args[0];
     }
 });
+Vim.defineEx("inserteq", "", function (cm: CodeMirror, params: any) {
+    let args = params.args
+    // @ts-ignore
+    asciimath.parseMath(args.join(" ")).outerHTML
+    cm.cm6.dispatch({
+        changes: {
+            from: cm.cm6.state.selection.main.from,
+            to: cm.cm6.state.selection.main.to,
+            // @ts-ignore
+            insert: "➕{" + asciimath.parseMath(args.join(" ")).outerHTML + "}"
+        }
+    })
+})
 Vim.defineAction("bufferCycleNext", () => {
     let new_selected_tab = selected_tab;
     new_selected_tab++;
@@ -354,6 +405,7 @@ type Tab = {
     saved: boolean;
     fsHandle: null | FileSystemFileHandle;
     state: EditorState;
+    newState: boolean,
 };
 let tabs: Tab[] = [
     {
@@ -361,6 +413,7 @@ let tabs: Tab[] = [
         saved: false,
         fsHandle: null,
         state: createDefaultEditorState(0),
+        newState: false,
     },
 ];
 
@@ -402,6 +455,7 @@ Vim.defineEx("edit", "e", async function () {
     const file = await tabs[selected_tab].fsHandle!.getFile();
     tabs[selected_tab].name = tabs[selected_tab].fsHandle!.name;
     tabs[selected_tab].saved = true;
+    tabs[selected_tab].newState = true;
     editor.setState(
         createNewEditorStateWithContents(selected_tab, await readFile(file))
     );
