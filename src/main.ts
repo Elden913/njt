@@ -138,7 +138,7 @@ let domEventHandler = EditorView.domEventHandlers({
                 reader.readAsDataURL(file!);
                 reader.onload = function () {
                     image.src = reader.result as string;
-                    image.onload = (image) => {
+                    image.onload = () => {
                         optimizeImageAndInsert(image, view);
                     }
                 };
@@ -281,7 +281,7 @@ Vim.defineEx("write", "w", async function () {
 Vim.defineEx("writeTo", "", async function () {
     return await saveFileAs();
 });
-Vim.defineEx("quite", "q", function () {
+Vim.defineEx("quit", "q", function () {
     tabs.splice(selected_tab, 1);
     if (tabs.length === 0) {
         tabs = [
@@ -337,7 +337,7 @@ Vim.defineEx("set", "", function (cm: CodeMirror, params: any) {
 });
 Vim.defineEx("insertimg", "i", async function (cm: CodeMirror, params: any) {
     let args: string[] = params.args;
-    if (args.length === undefined) {
+    if (args === undefined) {
         let file_handle = await getFileHandle();
         let file = await file_handle.getFile();
         let reader = new FileReader();
